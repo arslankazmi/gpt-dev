@@ -132,14 +132,32 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class Block(nn.Module):
+    """Block of transformer which intersperses communication and computation, in that order"""
+
+    def __init__(self, n_embed, n_head):
+        super().__init__()
+        head_size = n_embed // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.feed_forward = FeedForward(n_embed)
+
+    def forward(self, x):
+        x = self.sa(x)
+        x = self.feed_forward(x)
+        return x
+
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(block_size, n_embed)
         # self.sa_head = Head(n_embed) #- replaced with multiple heads
-        self.sa_heads = MultiHeadAttention(4, n_embed // 4) # 4 heads of 32 // 4 = 8 dimensions
-        self.feed_forward = FeedForward(n_embed)
+        self.blocks = nn.Sequential(
+            Block(n_embed, n_head=4),
+            Block(n_embed, n_head=4),
+            Block(n_embed, n_head=4),
+
+        )
         self.lm_head = nn.Linear(n_embed, vocab_size)
 
 
@@ -150,8 +168,7 @@ class BigramLanguageModel(nn.Module):
         positional_embeddings = self.position_embedding_table(torch.arange(T, device=device)) # (T, C)
         x = token_embeddings + positional_embeddings # (B, T, C)
         # x = self.sa_head(x) # apply only one head of self-attention
-        x = self.sa_heads(x) # apply only one head of self-attention
-        x = self.feed_forward(x) # (B, T, C)
+        x = self.blocks(x)
         logits = self.lm_head(x)
         
         
