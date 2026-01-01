@@ -113,9 +113,12 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([ Head(head_size) for _ in range(num_heads) ])
+        self.projection = nn.Linear(num_heads * head_size, n_embed)
 
     def forward(self, x):
-        return torch.cat([ h(x) for h in self.heads ], dim=-1) # concatenate across that least dimension, pretty standard
+        out = torch.cat([h(x) for h in self.heads], dim=-1) # concatenate across that least dimension, pretty standard
+        out = self.projection(out) # projection is just a linear transformation of the output of the previous layer (the heads)
+        return out
     
 class FeedForward(nn.Module):
     """Simple linear layer followed by enforced non-linearity"""
@@ -123,8 +126,9 @@ class FeedForward(nn.Module):
     def __init__(self, n_embed):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embed, n_embed),
+            nn.Linear(n_embed, 4 * n_embed), # 4x optimization from paper "Attentionis all you need", where they make the inner layer dimensionality 4x the outer layers
             nn.ReLU(),
+            nn.Linear(4 * n_embed, n_embed),
             # nn.Linear(4 * n_embed, n_embed),
             # nn.Dropout(dropout)
         )
@@ -140,10 +144,12 @@ class Block(nn.Module):
         head_size = n_embed // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.feed_forward = FeedForward(n_embed)
+        self.layer_norm1 = nn.LayerNorm(n_embed)
+        self.layer_norm2 = nn.LayerNorm(n_embed)
 
     def forward(self, x):
-        x = self.sa(x)
-        x = self.feed_forward(x)
+        x = x + self.sa(self.layer_norm1(x)) # residual connections
+        x = x + self.feed_forward(self.layer_norm2(x)) # residual connection
         return x
 
 class BigramLanguageModel(nn.Module):
