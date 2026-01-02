@@ -13,14 +13,17 @@ device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is
 
 # Hyperparamters
 
-batch_size = 32
-block_size = 8
+batch_size = 64
+block_size = 256
 max_iters = 5000
 eval_interval = 500
 eval_iters = 200
-learning_rate = 1e-3
+learning_rate = 3e-4
 generate_tokens = 1000
-n_embed = 32
+n_embed = 384
+n_layer = 6
+n_head = 6
+dropout = 0.2
 
 # load data
 
@@ -92,6 +95,8 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embed, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, x):
         B, T, C = x.shape
         k = self.key(x) # (B, T, C)
@@ -101,7 +106,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * C**-0.5 # (B, T, C) @ (B, C, T) -> (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
         wei = F.softmax(wei, dim=-1) # (B , T, T)
-
+        wei = self.dropout(wei)
         # perform the weighted average aggregation of the values
         y = self.value(x) # (B, T, C)
         out = wei @ y # (B, T, T) @ (B, T, C) -> (B, T, C)
@@ -114,10 +119,12 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([ Head(head_size) for _ in range(num_heads) ])
         self.projection = nn.Linear(num_heads * head_size, n_embed)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1) # concatenate across that least dimension, pretty standard
         out = self.projection(out) # projection is just a linear transformation of the output of the previous layer (the heads)
+        out = self.dropout(out)
         return out
     
 class FeedForward(nn.Module):
@@ -129,8 +136,7 @@ class FeedForward(nn.Module):
             nn.Linear(n_embed, 4 * n_embed), # 4x optimization from paper "Attentionis all you need", where they make the inner layer dimensionality 4x the outer layers
             nn.ReLU(),
             nn.Linear(4 * n_embed, n_embed),
-            # nn.Linear(4 * n_embed, n_embed),
-            # nn.Dropout(dropout)
+            nn.Dropout(dropout)
         )
 
     def forward(self, x):
@@ -159,12 +165,10 @@ class BigramLanguageModel(nn.Module):
         self.position_embedding_table = nn.Embedding(block_size, n_embed)
         # self.sa_head = Head(n_embed) #- replaced with multiple heads
         self.blocks = nn.Sequential(
-            Block(n_embed, n_head=4),
-            Block(n_embed, n_head=4),
-            Block(n_embed, n_head=4),
-            nn.LayerNorm(n_embed),
+            *[Block(n_embed, n_head=n_head) for _ in range(n_layer)]
 
         )
+        self.layer_norm_final = nn.LayerNorm(n_embed)
         self.lm_head = nn.Linear(n_embed, vocab_size)
 
 
@@ -176,6 +180,7 @@ class BigramLanguageModel(nn.Module):
         x = token_embeddings + positional_embeddings # (B, T, C)
         # x = self.sa_head(x) # apply only one head of self-attention
         x = self.blocks(x)
+        x = self.layer_norm_final(x)
         logits = self.lm_head(x)
         
         
