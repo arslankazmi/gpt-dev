@@ -53,7 +53,8 @@ class MLP(nn.Module):
     def forward(self, x):
         x = self.c_fc(x)
         x = self.gelu(x)
-        x - self.c_proj(x)
+        x = self.c_proj(x)
+        return x
 
 class Block(nn.Module):
     def __init__(self, config):
@@ -153,25 +154,81 @@ class GPT(nn.Module):
         sd_keys_hf = [ k for k in sd_keys_hf if not k.endswith('attn.masked_bias') ]
         sd_keys_hf = [ k for k in sd_keys_hf if not k.endswith('attn.bias') ]
         
+        # Create mapping from our keys to HF keys
+        # Both have same structure: transformer.h.*, transformer.wte, transformer.wpe, transformer.ln_f, lm_head.*
+        hf_key_map = {}  # Map from our key names to HF key names
+        
+        for k in sd_keys_hf:
+            hf_key_map[k] = k
+        
         # these weights are stored transposed in HF transformers
         transposed = [ 'attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
 
-        assert len(sd_keys) == len(sd_keys_hf), "State dict keys length mismatch"
+        assert len(sd_keys) == len(sd_keys_hf), f"State dict keys length mismatch: {len(sd_keys)} vs {len(sd_keys_hf)}"
 
-        for k in sd_keys_hf:
-            if any(k.endswith(w) for w in transposed):
-                assert sd_hf[k].shape[::-1] == sd[k].shape
+        for k_our in sd_keys:
+            k_hf = hf_key_map.get(k_our)
+            if k_hf is None:
+                print(f"Warning: Key {k_our} not found in HF model")
+                continue
+                continue
+            
+            if any(k_our.endswith(w) for w in transposed):
+                assert sd_hf[k_hf].shape[::-1] == sd[k_our].shape, f"Shape mismatch for {k_our}: {sd_hf[k_hf].shape[::-1]} vs {sd[k_our].shape}"
                 with torch.no_grad():
-                    sd[k].copy_(sd_hf[k].t()) # transposition
+                    sd[k_our].copy_(sd_hf[k_hf].t()) # transposition
             else:
-                assert sd_hf[k].shape == sd[k].shape
+                assert sd_hf[k_hf].shape == sd[k_our].shape, f"Shape mismatch for {k_our}: {sd_hf[k_hf].shape} vs {sd[k_our].shape}"
                 with torch.no_grad():
-                    sd[k].copy_(sd_hf[k])
+                    sd[k_our].copy_(sd_hf[k_hf])
 
         return model
     
 
 # -------------------
+num_return_sequences = 3
+max_new_tokens = 30
 
 model = GPT.from_pretrained('gpt2')
 print("Model loaded successfully.")
+
+model.eval()
+model.to('mps')
+
+import tiktoken
+enc = tiktoken.get_encoding("gpt2")
+
+tokens = enc.encode("I am a language model, and ")
+tokens = torch.tensor(tokens, dtype=torch.long)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (num_return_sequences, sequence_length)
+x = tokens.to('mps')
+
+# generation loop
+
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+torch.mps.manual_seed(42)
+
+while x.size(1) < max_new_tokens:
+    logits = model(x) # (B, T, vocab_size)
+    logits = logits[:, -1, :] # (B, vocab_size) taking logits at the lat position
+    probs = F.softmax(logits, dim=-1)
+
+    # huggingface does top-k sampling by default
+    top_k = 50
+    top_k_probs, top_k_indices = torch.topk(probs, top_k, dim=-1)
+
+    # select 1 token from top k
+
+    ix = torch.multinomial(top_k_probs, 1)
+
+    xcol = torch.gather(top_k_indices, -1, ix)
+
+    # i choose to print as we go in a streaming fashion
+    # so decode xcol to string and print
+    decoded = enc.decode(xcol.squeeze().cpu().numpy().tolist())
+    print(decoded, end='', flush=True)
+
+    # append to sequence
+    x = torch.cat((x, xcol), dim=1)
+
